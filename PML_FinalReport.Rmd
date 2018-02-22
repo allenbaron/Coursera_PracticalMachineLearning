@@ -106,13 +106,6 @@ examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
 NA_info <- examine_NA(df = training, ylab = "Number of Columns")
 ```
 
-```{r missing_tmp, fig.width = 4, fig.height = 3}
-train_NA <- purrr::map_dfc(training, is.na)
-col_pct_NA <- purrr::map_int(train_NA, ~sum(.)/length(.) * 100) %>%
-    round()
-qplot(col_n_NA, xlab = "Percent NA Values in Column", ylab = "Number of Columns")
-```
-
 ```{r}
 col_n_NA[col_n_NA > 50
 
