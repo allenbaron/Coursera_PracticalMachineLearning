@@ -1,0 +1,199 @@
+---
+title: "Predicting Curling Activity with Machine Learning"
+subtitle: "Final Project - Practical Machine Learning, Couersera"
+output: html_notebook
+---
+
+```{r libraries, include = FALSE}
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(doParallel)
+```
+
+# Executive Summary
+This report summarizes the development of algorithms to predict with high accuracy the type of biceps curl completed by participants during weight lifting using data provided by _Velloso, E., et al_. 
+
+The primary goal, to predict the curl type of 20 observations as part of the final quiz for the Coursera: Practical Machine Learning course, is achieved using a random forest (accuracy $\geq$ 99%) trained using only the name of participants and time-based variables. A secondary and more "real-life" goal, to predict the curl type accurately using variables measured by various sensors, is achieved with ...
+
+- include final algorithm(s) & essential attributes: accuracy, features, etc.
+
+# Introduction
+_Velloso, E., et al_ collected accelerometer, gyrometer, and magnetometer data from each location detailed in the image below for 5 types of unilateral dumbbell biceps curl (A-E), where A was the correct procedure and B-E represented specific errors: B = moving elbow forward, C = lifting only halfway, D = lowering only halfway, and E = moving hips forward. For more details, see _Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. [Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/har#ixzz57fKGqFGo). Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013._
+
+![](on-body-sensing-schema.png){ width=20% }
+
+Here, the data of _Velloso, E., et al_ is used to develop algorithms to predict which type of bicep curl is completed with 2 goals:
+
+- The primary goal is to utilize the data provided to correctly predict the curl type of 20 observations selected from the data by instructors for the final quiz for the Coursera: Practical Machine Learning course. To accomplish this with 95% confidence that all 20 will be correct (assuming a strict bonferroni correction) the model accuracy must be at least $1 - \frac{0.05}{20}$ = `r round(1- 0.05/20, 4)`. This assumes independence among the 20 observations, which is unlikely (but makes the calculation possible).
+- The secondary goal is to create an algorithm that _might_ be used in a production environment to provide real-time feedback to weight lifters about the quality of their bicep curl. Although the average person would likely not have access to so many sensors, there is no attempt to limit which sensors the model is trained with.
+
+# Exploratory Analysis and Feature Selection
+
+```{r import}
+training <- readr::read_csv("pml-training.csv", na = c("", "NA", "#DIV/0!"))
+testing <- readr::read_csv("pml-testing.csv", na = c("", "NA", "#DIV/0!"),
+                           col_types = spec(training) # for consistent loading
+                           )
+```
+
+
+```{r load_examine_NA, include = FALSE}
+# Return total (& percent) NA's in data frame and plot of percent NA's by column
+
+examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
+    # df = data.frame
+    # x_lim = ggplot2::histogram() xlim value, if desired
+    # bw = ggplot2::histogram() bw value, if desired
+    # plot = logical; whether or not to print plot of percent NA vals by column
+    # ... = other arguments passed to ggplot2::qplot()
+    
+    df_NA <- purrr::map_dfc(df, is.na)
+    ttl_NA <- sum(as.matrix(df_NA))
+    ttl_obs <- prod(dim(df)) #OR length(as.matrix(df))
+    
+    if(ttl_NA == 0) {
+        return("No NA values in data set")
+    }
+    # print total & proportion NA
+    print(
+        paste(
+            ttl_NA, "NA values of", ttl_obs, "observations =",
+            round(ttl_NA/ttl_obs*100, 2), "percent."
+        )
+    )
+    
+    # create plot
+    if (plot == TRUE) {
+    NA_by_col <- purrr::map_dbl(df_NA, ~round(sum(.)/length(.)*100, 2))
+    rng <- range(NA_by_col)
+    
+    if (is.null(x_lim)) {
+        if (diff(rng) < 10) {
+            lower <- ((mean(rng) - 5) + abs(mean(rng) - 5)) / 2
+            x_lim <- c(lower, lower + 10)
+        } else {
+            x_lim <- rng
+        }
+    }
+    if (is.null(bw)) {
+        bw <- diff(x_lim)/25
+    }
+    
+
+        print(
+            ggplot2::qplot(NA_by_col, xlab = "Percent NA", binwidth = bw, ...) +
+                ggplot2::coord_cartesian(xlim = x_lim)
+        )
+    }
+    
+    # return useful variables invisibly
+    invisible(
+        list(
+            df_NA_present = df_NA, # TRUE if position in df is NA
+            df_total_NA = ttl_NA,
+            col_total_NA = purrr::map_int(df_NA, sum), # count of NA per column
+            col_pct_NA = NA_by_col # percent of NA per column
+        )
+    )
+    
+}
+```
+
+
+```{r missing, fig.width = 4, fig.height = 3}
+# returns total # of NA values in data.frame and plots % NA by variable
+NA_info <- examine_NA(df = training, ylab = "Number of Columns")
+```
+
+```{r missing_tmp, fig.width = 4, fig.height = 3}
+train_NA <- purrr::map_dfc(training, is.na)
+col_pct_NA <- purrr::map_int(train_NA, ~sum(.)/length(.) * 100) %>%
+    round()
+qplot(col_n_NA, xlab = "Percent NA Values in Column", ylab = "Number of Columns")
+```
+
+```{r}
+col_n_NA[col_n_NA > 50
+
+training_60 <- dplyr::select_if(training, col_n_NA < 5000)
+```
+
+```{r missing2}
+train60_NA <- purrr::map_dfc(training_60, is.na)
+
+# total NA values remaining
+as.matrix(train60_NA) %>%
+    sum()
+```
+
+```{r filter_NA}
+training_60 <- dplyr::filter(training_60, ~apply(., 1, all))
+```
+
+# Model Training & Evaluation
+describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did
+
+# Appendix (for Reproducibility)
+
+```{r show_examine_NA, eval = FALSE}
+# Return total (& percent) NA's in data frame and plot of percent NA's by column
+
+examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
+    # df = data.frame
+    # x_lim = ggplot2::histogram() xlim value, if desired
+    # bw = ggplot2::histogram() bw value, if desired
+    # plot = logical; whether or not to print plot of percent NA vals by column
+    # ... = other arguments passed to ggplot2::qplot()
+    
+    df_NA <- purrr::map_dfc(df, is.na)
+    ttl_NA <- sum(as.matrix(df_NA))
+    ttl_obs <- prod(dim(df)) #OR length(as.matrix(df))
+    
+    if(ttl_NA == 0) {
+        return("No NA values in data set")
+    }
+    # print total & proportion NA
+    print(
+        paste(
+            ttl_NA, "NA values of", ttl_obs, "observations =",
+            round(ttl_NA/ttl_obs*100, 2), "percent."
+        )
+    )
+    
+    # create plot
+    if (plot == TRUE) {
+    NA_by_col <- purrr::map_dbl(df_NA, ~round(sum(.)/length(.)*100, 2))
+    rng <- range(NA_by_col)
+    
+    if (is.null(x_lim)) {
+        if (diff(rng) < 10) {
+            lower <- ((mean(rng) - 5) + abs(mean(rng) - 5)) / 2
+            x_lim <- c(lower, lower + 10)
+        } else {
+            x_lim <- rng
+        }
+    }
+    if (is.null(bw)) {
+        bw <- diff(x_lim)/25
+    }
+    
+
+        print(
+            ggplot2::qplot(NA_by_col, xlab = "Percent NA", binwidth = bw, ...) +
+                ggplot2::coord_cartesian(xlim = x_lim)
+        )
+    }
+    
+    # return useful variables invisibly
+    invisible(
+        list(
+            df_NA_present = df_NA, # TRUE if position in df is NA
+            df_total_NA = ttl_NA,
+            col_total_NA = purrr::map_int(df_NA, sum), # count of NA per column
+            col_pct_NA = NA_by_col # percent of NA per column
+        )
+    )
+    
+}
+```

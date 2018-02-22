@@ -1,0 +1,638 @@
+---
+title: "PML - Exploratory Analysis & Plan"
+output: 
+    html_notebook:
+      toc: yes
+      toc_depth: 4
+---
+
+```{r libraries, include = FALSE}
+library(tidyverse)
+library(microbenchmark)
+library(ggridges)
+library(lubridate)
+library(caret)
+library(randomForest)
+library(doParallel)
+```
+
+
+# Get Data
+
+```{r data}
+download.file(
+    "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+    destfile = "pml-training.csv"
+)
+download.file(
+    "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+    destfile = "pml-testing.csv"
+)
+# date-time downloaded
+Sys.time()
+```
+
+# Learning about the data set
+
+## Info from authors
+67777
+
+### Features
+Used varying sliding time windows 0.5-2.5 sec with 0.5 sec overlap to calculate:
+
+1. Euler angles (roll = , pitch, yaw)
+
+## Exploring the data set
+
+### Load data
+
+Quick checked format first with _git-bash_ `head pml-training.csv`. Missing a heading for the first row, lots of "" and NA values but those will be interpreted as NA so they should be okay.
+
+```{r load_data, message = FALSE}
+training <- readr::read_csv("pml-training.csv")
+testing <- readr::read_csv("pml-testing.csv")
+```
+
+#### Examine loading errors
+
+Training set has errors, test set does not.
+```{r load_errors}
+readr::problems(training)
+readr::problems(testing)
+```
+
+Most errors in `training` occurred in "kurtosis_roll_arm" column (total = 12 columns) and were caused by the presence of "#DIV/0!" values.
+```{r load_errors2}
+load_err <- readr::problems(training) %>%
+    dplyr::mutate(exp_act = paste(expected, actual, sep = "_"))
+dplyr::count(load_err, col)
+dplyr::count(load_err, exp_act)
+```
+"#DIV/0!" values are present in the original file;  _git-bash_ `grep "DIV" pml-training.csv`. They can be eliminated by adding that value as an "NA" in `readr::read_csv()`.
+
+The "no trailing characters" error was probably fixed by `read_csv()`. Nope, it looks like they all exist in one row and the values were replaced with "NA".
+```{r load_errors3}
+dplyr::filter(load_err, expected == "no trailing characters")
+select(training, starts_with("magnet"))[5373, ]
+```
+
+Examine row in original file using _git-bash_ `sed '5374q;d' file`. Those values are all  properly formatted decimal numbers but `read_csv()` made the columns integer class. Since these were the only 3 errors in parsing, they were probably aberrations. I'll just accept them as errors for now since they're a VERY small subset of the data.
+
+#### FYI - More col spec info with `readr`
+Reading the `readr` vignette I learned that it can look at column types before downloading the file with `spec_csv()`. Comparing the default scenario with a test the case where the column specifications are determined using all the values, I see only the 3 columns I expected have a different format and that using all observations still took the function < 1 second to complete.
+
+
+```{r data_spec, message = FALSE, warning = FALSE}
+# checking col specification with defaults
+train_spec <- spec_csv("pml-training.csv", na = c("", "NA", "#DIV/0!"))
+# condensed readout
+cols_condense(train_spec)
+
+# checking col specification with all observations
+train_spec2 <- spec_csv("pml-training.csv", na = c("", "NA", "#DIV/0!"), guess_max = 19622)
+cols_condense(train_spec2)
+
+# identify cols with different specifications between approaches
+tmp <- capture.output(cols_condense(train_spec))
+tmp2 <- capture.output(cols_condense(train_spec2))
+no_match <- tmp %in% tmp2
+tmp[!no_match]
+
+# check speed differences
+microbenchmark(
+    def_1000 = spec_csv("pml-training.csv", na = c("", "NA", "#DIV/0!")),
+    all_rows = spec_csv("pml-training.csv", na = c("", "NA", "#DIV/0!"), guess_max = 19622),
+    times = 1
+    )
+```
+
+### Reload training & testing data
+I'll reload the training data correcting the "#DIV/0!" problem and then use the column specifications from the training set to import the testing set (for consistency). In doing this, I've noted the last column (#160) is "problem_id" instead of "classe" but `readr` correctly identified it as an integer.
+
+```{r data_reload, message = FALSE}
+training <- readr::read_csv("pml-training.csv", na = c("", "NA", "#DIV/0!"))
+
+testing <- readr::read_csv("pml-testing.csv", na = c("", "NA", "#DIV/0!"),
+                           col_types = spec(training)
+                           )
+```
+
+### Missing values
+
+There is a lot of missing data in the training data set, ~ 61%. Looking more closely it looks like 6 columns are completely `NA` but there are no completely `NA` rows.
+```{r data_missing}
+train_NA <- purrr::map_dfc(training, is.na)
+
+# missing values
+as.matrix(train_NA) %>%
+    {sum(.)/length(.)}
+
+col_NA <- map_lgl(train_NA, all)
+row_NA <- apply(train_NA, 1, all)
+
+# cols/rows completely missing
+names(train_NA)[col_NA]
+train_NA[row_NA, ]
+```
+
+A histogram of the columns by number of NA values shows ~100 columns with very high numbers of NA values (orange line = 50% NA, red line = 90% NA). These probably will not be useful for building a model.
+```{r missing2}
+col_n_NA <- purrr::map_int(train_NA, sum)
+qplot(col_n_NA) +
+    geom_vline(
+        xintercept = c(nrow(train_NA)/2, nrow(train_NA)*0.9),
+        color = c("orange", "red"),
+        size = 1
+    )
+```
+
+#### Remove (almost) empty columns
+The columns with few (or no) missing values in the new data set all appear to be from the initial measurements of the 3 sensors. I wonder why the calculated features would be missing so much data?
+
+```{r empty_cols}
+empty_cols <- dplyr::select_if(training, col_n_NA > 5000)
+training_60 <- dplyr::select_if(training, col_n_NA < 5000)
+names(training_60)
+```
+
+### Column Types
+Earlier I noticed some `character` columns which I expected to be `numeric`, those appear to be gone now (possibly the NA-only columns). 
+```{r col_char}
+train_char <- keep(training_60, is.character)
+head(train_char)
+```
+
+### Column Distributions
+
+I'm not sure at this point what I learn from looking at the distributions of all the mode = `numeric`. The `gyros` all look similar with a normal distribution, while the columns starting with `magnet` are very spread out and appear to have outliers.
+
+The `Removed 3 rows containing non-finite values` error is due to the presence of NA values (only 3 in the whole remaining data set).
+```{r distributions, fig.height = 8}
+train_long <- training_60 %>%
+    purrr::keep(is.numeric) %>%
+    dplyr::select(-X1, -contains("timestamp"), -contains("window")) %>%
+    tidyr::gather(key = "column")
+
+ggplot2::ggplot(data = train_long, aes(x = value, y = column)) +
+    ggridges::geom_density_ridges(rel_min_height = 0.01) +
+    theme_ridges() +
+    coord_cartesian(xlim = c(-1000, 1500))
+
+sum(is.na(train_long$value))
+```
+
+Not much easier to see as boxplots... probably harder.
+```{r num_boxplots}
+ggplot2::ggplot(data = train_long, aes(x = value, y = column)) +
+    geom_boxplot(outlier.color = "red", outlier.size = 2)
+```
+
+There appear to be 4 character vectors, one of which is actually a date-time. I don't know what `new_window` is. The number of readouts by each person are not equal, nor are the classes. That might not matter much but it's something to be aware of.
+```{r char_vals}
+purrr::keep(training_60, is.character) %>%
+    purrr::map(unique)
+
+table(training_60$user_name)
+table(training_60$new_window)
+table(training_60$classe)
+```
+
+## Thoughts on time, activities, and model development
+Looking at the values of the character vectors leads me to wonder about time and the activities. There's probably more information to be gleaned about the group of movement during an activity than a specific timepoint. BUT, I have to predict given a single observation with a total of only 20 so I may want to avoid grouping observations by activity + timestamp. However, I bet I could accurately predict those 20 cases with just the timestamp variable. It wouldn't work for predicting how well someone did this exercise in real life but it would within this data set I think.
+
+### Examining time vs activity
+
+Subset to time variables and include the user and classe variables to determine if there's a correlation. `user_name` may or may not be necessary. 
+```{r time_df}
+time <- dplyr::select(training_60,
+                      classe,
+                      user_name,
+                      contains("time"),
+                      contains("window")
+                      )
+
+str(time, give.attr = FALSE)
+
+# convert timestamp to an R date format
+tmp <- strptime(time$cvtd_timestamp, format = "%m/%d/%Y %H:%M")
+
+# some failed
+fail <- tmp %>% is.na()
+
+# why? not month/day/year = day/month/year
+time$cvtd_timestamp[fail] %>% head()
+
+time <- dplyr::mutate(time,
+                      cvtd_timestamp = lubridate::dmy_hm(time$cvtd_timestamp),
+                      user_name = as.factor(user_name),
+                      classe = as.factor(classe)
+)
+
+str(time, give.attr = FALSE)
+```
+
+Got a good idea for looking at a lot of variables against a few specific ones from Dr. Simon Jackson's [blog](https://drsimonj.svbtle.com/plot-some-variables-against-many-others).
+
+Looking at other variables by classe (on x-axis) and user_name (as color), I can tell `raw_timestamp_part_2` will not be helpful, while there is significant clustering in the 3 other variables. The `num_window` variable has a clear pattern for most users, increasing from classe A to E. I'm guessing the remaining `timestamp` variables are similar and look the way they do because the user time variation is much smaller than the time difference _between_ users.
+```{r time_plot}
+time %>%
+    select(-new_window) %>%
+    tidyr::gather(-user_name, -classe, key = "var", value = "value", na.rm = TRUE) %>%
+    ggplot2::ggplot(aes(x = classe, y = value, color = user_name)) +
+        geom_jitter() +
+        facet_wrap(~var, scales = "free")
+```
+
+If I plot just `raw_timestamp_part_1` facetted by user_name we get near perfect separation of each of the classe values. Predicting _ONLY_ using the `raw_timestamp_part_1` and `user_name` variables may not work if those boundaries are not clear cut.
+```{r time_plot2}
+time %>%
+    select(user_name, classe, raw_timestamp_part_1) %>%
+    ggplot2::ggplot(aes(x = classe, y = raw_timestamp_part_1)) +
+        geom_jitter() +
+        facet_wrap(~user_name, scales = "free")
+```
+
+I'll look at the max & min values of the various variables to determin if there's separation.
+```{r time_summaries}
+time_by_user_class <- time %>%
+    group_by(user_name, classe) %>%
+    summarize_if(~!is_character(.), c("min", "max"))
+
+head(time_by_user_class)
+```
+
+That data frame is a bit too large to read easily so I'll focus in on `raw_timestamp_part_1` and determine if any `min` values not in a pair are below the `max` values. A plot of `min` by `max` doesn't look like I expected. Maybe there's too much overlap? Or the `min` numbers could be the same for every `user_name`-`classe` pair? Nope, the `min` and `max` values are all unique. Maybe it would be easier to see plotted as line segments?
+
+```{r time_summary2}
+ggplot(time_by_user_class,
+       aes(x = raw_timestamp_part_1_min, y = raw_timestamp_part_1_max)) +
+    geom_point(aes(color = user_name, shape = classe))
+
+# 30 unique 'min' values
+time_by_user_class$raw_timestamp_part_1_min %>%
+    unique() %>%
+    length()
+# 30 unique 'max' values
+time_by_user_class$raw_timestamp_part_1_max %>%
+    unique() %>%
+    length()
+
+# NO idea why this plot lacks visible output -- what a pain!
+ggplot(aes(raw_timestamp_part_1_min, user_name)) +
+    geom_segment(
+        aes(xend = raw_timestamp_part_1_max, yend = user_name, color = classe
+            ),
+        size = 2
+    )
+```
+
+
+# Split training
+
+```{r split_datasets}
+set.seed(1356)
+inTrain <- createDataPartition(training_60$X1, p = 0.7, list = FALSE)
+train_set <- training_60[inTrain, ]
+test_set <- training_60[-inTrain, ]
+
+time_trn <- time[inTrain, ]
+time_test <- time[-inTrain, ]
+```
+
+# Train models
+
+## First on only `time` data set
+
+### Multinomial (with `nnet`)
+
+```{r time_multinom}
+system.time(time_multinom <- caret::train(classe ~ .,
+                                          method = "multinom",
+                                          data = time_trn,
+                                          trace = FALSE))
+time_multinom
+```
+
+### Random Forest
+```{r time_rf}
+system.time(time_rf1 <- caret::train(classe ~ ., method = "rf", data = time_trn))
+time_rf1
+
+system.time(time_rf2 <- caret::train(classe ~ ., method = "parRF", data = time_trn))
+time_rf2
+
+system.time(time_rf3 <- randomForest::randomForest(classe ~ ., data = time_trn))
+time_rf3
+```
+`randomForest()` gave that error because `new_window` is of the character type. Rerun.
+
+```{r time_rf2}
+time_trn2 <- mutate(time_trn, new_window = as.factor(new_window))
+
+system.time(time_rf3 <- randomForest::randomForest(classe ~ ., data = time_trn2))
+time_rf3
+```
+
+### Predictions
+```{r time_pred}
+time_test2 <- mutate(time_test, new_window = factor(new_window, levels = c("no", "yes")))
+
+all_pred <- tibble(
+    classe = time_test$classe,
+    multinom = predict(time_multinom, new = time_test),
+    caret_rf = predict(time_rf1, new = time_test),
+    parRF = predict(time_rf2, new = time_test),
+    rf = predict(time_rf3, new = time_test2)
+)
+
+all_pred[, -1] %>%
+    purrr::map_dfc(function(col) col == all_pred$classe) %>%
+    purrr::map_dbl(function(x) sum(x)/length(x))
+```
+
+Sure enough. With a random forest I can predict the correct `classe` using just the time and person doing the activity.
+
+```{r mdl_dtls}
+feature_importance <- function(importance) {
+    importance %>%
+        as.data.frame() %>%
+        tibble::rownames_to_column(var = "feature") %>%
+        dplyr::arrange(desc(MeanDecreaseGini)) %>%
+        mutate(MeanDecreaseGini = round(MeanDecreaseGini, 2))
+}
+
+time_rf1$finalModel$importance %>%
+    feature_importance()
+
+time_rf2$finalModel$importance %>%
+    feature_importance
+
+time_rf3$importance %>%
+    feature_importance
+```
+
+## Rerun without 'window' features
+
+```{r time_minus_window}
+time2 <- time %>%
+    mutate(new_window = factor(new_window, levels = c("no", "yes"))) %>%
+    select(-contains("window"))
+
+time2_trn <- time2[inTrain, ]
+time2_test <- time2[-inTrain, ]
+
+microbenchmark::microbenchmark(
+    multinom = time2_multinom <- caret::train(classe ~ .,
+                                          method = "multinom",
+                                          data = time2_trn,
+                                          trace = FALSE),
+    caret_rf = time2_rf1 <- caret::train(classe ~ ., method = "rf", data = time2_trn),
+    parRF = time2_rf2 <- caret::train(classe ~ ., method = "parRF", data = time2_trn),
+    rf = time2_rf3 <- randomForest::randomForest(classe ~ ., data = time2_trn),
+    times = 1
+    )
+
+all_pred2 <- tibble(
+    classe = time2_test$classe,
+    multinom = predict(time2_multinom, new = time2_test),
+    caret_rf = predict(time2_rf1, new = time2_test),
+    parRF = predict(time2_rf2, new = time2_test),
+    rf = predict(time2_rf3, new = time2_test)
+)
+
+all_pred2[, -1] %>%
+    purrr::map_dfc(function(col) col == all_pred2$classe) %>%
+    purrr::map_dbl(function(x) sum(x)/length(x))
+```
+
+## Training for real application
+
+### Remove inappropriate features
+A strong predictive model can be derived using only the time-based and `user_name` variables. These variables will not exist for prediction with future applications and must be removed or altered prior to prediction. **I will do this on the complete data set and the 60-variable data set (where high-NA cols had been removed) because I want to see how models perform on each.
+
+Remove variables containing 'window', `user_name` and `cvtd_timestamp` (this variable is not sufficiently accurate to separate out the different times).
+
+From raw timestamp variables, create a new _RELATIVE_ time variable. This would prevent prediction from an absolute timestamp, which will not exist in real-life predictions.
+
+**NOTE: The relative time won't work for the quiz because I can't calculate relative time for activity w/o classe. It may generally be irrelevant because 10 repetitions were done. So, I won't use that feature either.**
+
+```{r feature_refine}
+raw_time <- with(training,
+                 paste(raw_timestamp_part_1, raw_timestamp_part_2, sep = ".")
+                 ) %>%
+    as.double()
+
+# all should be unique (and are)
+raw_time %>%
+    unique() %>%
+    length()
+nrow(training)
+
+# make timestamp relative to activity start
+rel_time_df <- select(training, user_name, classe) %>%
+    mutate(raw = raw_time) %>%
+    group_by(user_name, classe) %>%
+    arrange(raw, .by_group = TRUE) %>%
+    mutate(rel = raw - min(raw))
+
+training_large <- mutate(training, rel_time = rel_time_df$rel) %>%
+    select(-contains('window'), -contains('timestamp'), -user_name, -X1)
+
+training_small <- mutate(training_60, rel_time = rel_time_df$rel) %>%
+    select(-contains('window'), -contains('timestamp'), -user_name, -X1)
+```
+
+### Train random forest in parallel
+
+Remove features known to have no predictive value (again), split off test set (same for both training sets).
+
+```{r prep_sets}
+train_large <- select(training,
+                         -contains('window'),
+                         -contains('timestamp'),
+                         -X1, -user_name
+                         )
+
+train_small <- select(training_60,
+                         -contains('window'),
+                         -contains('timestamp'),
+                         -X1, -user_name
+                         )
+
+set.seed(5432)
+inTrain <- createDataPartition(training$X1, p = 0.7, list = FALSE)
+
+test_large <- train_large[-inTrain, ]
+test_small <- train_small[-inTrain, ]
+train_large <- train_large[inTrain, ]
+train_small <- train_small[inTrain, ]
+```
+
+#### Train small after setting up parallel cluster
+```{r registerCluster}
+cl <- parallel::makeCluster(parallel::detectCores() - 1)
+doParallel::registerDoParallel(cl)
+```
+
+```{r}
+fitControl <- trainControl(method = "cv",
+                           number = 5,
+                           allowParallel = TRUE)                         
+```
+
+```{r rf_parallel_small}
+system.time(
+    fit_small <- train(classe ~ ., method = "parRF", data = train_small,
+                       na.action = 'na.omit', 
+                       trControl = fitControl
+                       )
+)
+fit_small
+```
+That model should be good enough to predict the quiz according to [Len Greski](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md).
+
+```{r small_col_importance}
+small_importance <- fit_small$finalModel$importance %>%
+    feature_importance()
+small_importance
+```
+
+Sheesh! That algorithm used every feature for prediction.
+
+What about just using the 20 most important?
+```{r train_20}
+train_20 <- select(train_small, one_of(small_importance$feature[1:20]), classe)
+test_20 <- select(test_small, one_of(small_importance$feature[1:20]), classe)
+
+system.time(
+    fit_20 <- train(classe ~ ., method = "parRF", data = train_20,
+                       na.action = 'na.omit', 
+                       trControl = fitControl
+                       )
+)
+fit_20
+```
+Not good enough. But close!
+
+
+#### Train with whole set (actually on calculated data)
+`train_large` as it is currently won't work because of NA values. It returns:
+"Error in na.fail.default(list(classe = c("A", "A", "A", "A", "A", "A", : missing values in object"
+
+**NOTE: I just realized that the large number of missing values in the computed columns are because they were computed over a 'window'.** That means there aren't that many missing values (each value is like a summary).
+
+Let's choose only the rows with values in EVERY the calculated feature and try to predict on that. The calculated cols ~ empty_cols from earlier (it has 6 completely empty columns, I think, which will need to be removed). Ultimately I hope to have at least 1 calculated value per person per activity (a total of at least `r with(training, length(unique(classe)) * length(unique(user_name)))` observations).
+
+
+```{r calc_feature_select}
+# remove completely empty rows
+empty_cols <- empty_cols %>% 
+    mutate(classe = training$classe)
+empty_cols_NA <- purrr::map_dfc(empty_cols, is.na)
+calc_cols <- select(empty_cols, which(!map_lgl(empty_cols_NA, all)))
+
+# identify non-NA rows using NA logical
+calc_cols_NA <- purrr::map_dfc(calc_cols, is.na)
+use_row <- apply(calc_cols_NA, 1, any)
+
+train_calc <- filter(calc_cols, !use_row)
+
+# no NA values in final set
+map(train_calc, is.na) %>%
+unlist() %>%
+sum()
+```
+That results in only `r nrow(train_calc)` observations retained, which is only about `r round(nrow(train_calc)/nrow(empty_cols) * 100, 2)` percent of the total data set, but more at least than the minimum I hoped for.
+
+Let's try this. I doubt it will work.
+
+```{r rf_parallel_calc}
+system.time(
+    fit_calc <- train(classe ~ ., method = "rf", data = train_calc,
+                       trControl = fitControl)
+)
+fit_calc
+```
+That's not going to be good enough but maybe it was because we created the test set? In any case it doesn't matter.
+
+Let's see how good they predict the test set we set aside.
+
+As expected the 'small' set did well (the set with no NA cols, _aka_ calculated values)
+```{r small_test}
+small_pred <- predict(fit_small, test_small)
+sum(small_pred == as.factor(test_small$classe)) / nrow(test_small)
+```
+```{r calc_test}
+# select appropriate columns and filter NA vals (req'd)
+test_calc <- select(test_large, one_of(names(train_calc)))
+
+test_calc_NA <- purrr::map_dfc(test_calc, is.na)
+use_row2 <- apply(test_calc_NA, 1, any)
+
+test_calc2 <- filter(test_calc, !use_row2)
+
+# no NA values in final set
+map(train_calc, is.na) %>%
+unlist() %>%
+sum()
+
+calc_pred <- predict(fit_calc, test_calc2)
+sum(calc_pred == as.factor(test_calc2$classe)) / nrow(test_calc2)
+```
+That predicted the 64 activities perfectly. Woah! I wonder how it does on the quiz test set.
+
+```{r DEregisterCluster}
+stopCluster(cl)
+registerDoSEQ()
+```
+
+# Predictions for Quiz
+
+## With 'time only' models (actual submission)
+Submission to quiz showed 20/20 = All correct!
+```{r quiz}
+# subset and format for models
+testing_time <- dplyr::select(testing, dplyr::one_of(names(time))) %>%
+    dplyr::mutate(
+        cvtd_timestamp = lubridate::dmy_hm(cvtd_timestamp),
+        user_name = factor(
+            user_name,
+            levels = c('adelmo', 'carlitos', 'charles', 'eurico', 'jeremy', 'pedro'))
+        )
+
+# fornat for randomForest
+testing_time2 <- mutate(testing_time, new_window = factor(new_window, levels = c("no", "yes")))
+
+testing_pred <- tibble(
+    multinom = predict(time_multinom, testing_time),
+    caret_rf = predict(time_rf1, testing_time),
+    parRF = predict(time_rf2, testing_time),
+    rf = predict(time_rf3, testing_time2)
+)
+
+# multinom has VERY low accuracy so ignoring for this
+correct_classe <- apply(testing_pred[, -1], 1, unique)
+```
+
+# With small & calc algorithms
+Perfect prediction with 'small' algorithm
+```{r quiz_small}
+# subset and format for model
+testing_small <- dplyr::select(testing, dplyr::one_of(names(train_small)))
+testing_pred_small <- predict(fit_small, testing_small)
+
+all(testing_pred_small == as.factor(correct_classe))
+```
+I thought I'd explored the quiz data set `testing` and saw that it had no missing values but that is actually not the case. _EVERY_ value is missing after the subset in the quiz set so I can't predict at all with those values. Pretty terrible algorithm!
+
+```{r quiz_calc}
+# subset for model
+testing_calc <- dplyr::select(testing, dplyr::one_of(names(train_calc)))
+
+# missing values after subset = all values after subset
+map(testing_calc, is.na) %>%
+    unlist() %>%
+    sum()
+prod(dim(testing_calc))
+```
+
