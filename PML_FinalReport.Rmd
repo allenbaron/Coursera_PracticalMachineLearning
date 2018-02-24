@@ -6,20 +6,19 @@ output: html_notebook
 
 ```{r libraries, include = FALSE}
 library(tidyverse)
-library(lubridate)
 library(caret)
 library(doParallel)
 ```
 
 # Executive Summary
-This report summarizes the development of algorithms to predict with high accuracy the type of biceps curl completed by participants during weight lifting using data provided by _Velloso, E., et al_. 
+This report summarizes the development of algorithms to predict with high accuracy the type of weightlift curl completed by participants using data provided by _Velloso, E., et al_. 
 
 The primary goal, to predict the curl type of 20 observations as part of the final quiz for the Coursera: Practical Machine Learning course, is achieved using a random forest (accuracy $\geq$ 99%) trained using only the name of participants and time-based variables. A secondary and more "real-life" goal, to predict the curl type accurately using variables measured by various sensors, is achieved with ...
 
 - include final algorithm(s) & essential attributes: accuracy, features, etc.
 
 # Introduction
-_Velloso, E., et al_ collected accelerometer, gyrometer, and magnetometer data from each location detailed in the image below for 5 types of unilateral dumbbell biceps curl (A-E), where A was the correct procedure and B-E represented specific errors: B = moving elbow forward, C = lifting only halfway, D = lowering only halfway, and E = moving hips forward. For more details, see _Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. [Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/har#ixzz57fKGqFGo). Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013._
+_Velloso, E., et al_ collected accelerometer, gyrometer, and magnetometer data from each location detailed in the image below for 5 types of unilateral dumbbell weightlift curl (A-E), where A was the correct procedure and B-E represented specific errors: B = moving elbow forward, C = lifting only halfway, D = lowering only halfway, and E = moving hips forward. For more details, see _Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. [Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/har#ixzz57fKGqFGo). Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013._
 
 ![](on-body-sensing-schema.png){ width=20% }
 
@@ -29,14 +28,168 @@ Here, the data of _Velloso, E., et al_ is used to develop algorithms to predict 
 - The secondary goal is to create an algorithm that _might_ be used in a production environment to provide real-time feedback to weight lifters about the quality of their bicep curl. Although the average person would likely not have access to so many sensors, there is no attempt to limit which sensors the model is trained with.
 
 # Exploratory Analysis and Feature Selection
+```{r import_data, results = 'hold', message = FALSE, warning = FALSE}
+weightlift <- readr::read_csv(
+    "pml-training.csv",
+    na = c("", "NA", "#DIV/0!"),
+    col_types = cols(
+        .default = col_double(),
+        cvtd_timestamp = col_date("%d/%m/%Y %H:%M"),
+        user_name = col_factor(
+            levels = c("carlitos", "pedro", "adelmo", "charles", "eurico", "jeremy")
+            ),
+        new_window = col_factor(levels = c("no", "yes")),
+        classe = col_factor(levels = c("A", "B", "C", "D", "E"))
+        )
+    )
 
-```{r import}
-training <- readr::read_csv("pml-training.csv", na = c("", "NA", "#DIV/0!"))
-testing <- readr::read_csv("pml-testing.csv", na = c("", "NA", "#DIV/0!"),
-                           col_types = spec(training) # for consistent loading
-                           )
+readr::problems(weightlift)
 ```
 
+```{r split_for_oob}
+inTrain <- caret::createDataPartition(weightlift$X1, p = 0.7, list = FALSE)
+wl_train <- weightlift[inTrain, ]
+wl_test <- weightlift[-inTrain, ]
+```
+
+
+# Model 1 - Training on User + Time
+
+participants can't do all 5 activities at same time, can likely predict well by `user_name` and time-related variables only.
+
+describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did
+
+```{r time_plot}
+wl_train <- dplyr::mutate(
+    wl_train,
+    timestamp = as.numeric(
+        paste(raw_timestamp_part_1, raw_timestamp_part_2, sep = "." )
+        )
+    )
+    
+ggplot2::ggplot(data = wl_train, aes(x = classe, y = timestamp)) +
+    geom_boxplot() +
+    facet_wrap(~user_name, scales = "free")
+```
+
+```{r doParallel}
+cl <- parallel::makeCluster(parallel::detectCores() - 1)
+doParallel::registerDoParallel(cl)
+```
+
+see Max Kuhn's analysis
+```{r}
+fitControl <- trainControl(method = "cv",
+                           number = 10,
+                           allowParallel = TRUE)                         
+```
+
+```{r time_rf}
+time_rf <- train(classe ~ user_name + timestamp,method = "rf", data = wl_train,
+                       trControl = fitControl
+                       )
+time_rf
+```
+
+```{r time_rf_all, include = FALSE}
+time_rf_all <- train(classe ~ user_name + timestamp + num_window + new_window + cvtd_timestamp, method = "rf", data = wl_train,
+                       trControl = fitControl
+                       )
+time_rf_all
+```
+
+```{r load_rf_importance, include = FALSE}
+rf_importance <- function(importance) {
+    importance %>%
+        as.data.frame() %>%
+        tibble::rownames_to_column(var = "feature") %>%
+        dplyr::arrange(desc(MeanDecreaseGini)) %>%
+        mutate(MeanDecreaseGini = round(MeanDecreaseGini, 2))
+}
+```
+
+```{r time_importance}
+rf_importance(time_rf_all$finalModel$importance)
+```
+
+```{r time_rf3, include = FALSE}
+time_rf3 <- train(classe ~ user_name + timestamp + num_window,
+                   method = "rf",
+                   data = wl_train,
+                   trControl = fitControl
+                   )
+time_rf3
+```
+
+```{r DEregisterCluster}
+stopCluster(cl)
+registerDoSEQ()
+```
+
+```{r prep_test}
+wl_test <- dplyr::mutate(
+    wl_test,
+    timestamp = as.numeric(
+        paste(raw_timestamp_part_1, raw_timestamp_part_2, sep = "." )
+        )
+    )
+```
+
+```{r load_oob_accuracy, include = FALSE}
+oob_accuracy <- function(test_set, outcome_var, ..., accuracy_only = TRUE) {
+    # ... = models from caret::train()
+    # accuracy_only = if FALSE, returns accuracy and data.frame of raw predictions
+    
+    library(purrr)
+
+    model_names <- map_chr(as.list(substitute(list(...)))[-1L], deparse)
+    model <- list(...)
+    
+    outcome <- eval(substitute(outcome_var), test_set, parent.frame())
+    pred_list <- map(eval(model), .f = predict, newdata = test_set)
+    accuracy <- map_dbl(pred_list, ~sum(. == outcome)/length(outcome))
+    names(accuracy) <- model_names
+    
+    if (accuracy_only) {
+        return(accuracy)
+    } else {
+        names(pred_list) <- model_names
+        return(list(accuracy = accuracy, prediction = as.data.frame(pred_list)))
+    }
+}
+```
+
+```{r}
+oob_accuracy(wl_test, classe, time_rf, time_rf_all, time_rf3)
+```
+
+```{r import_quiz, warning = FALSE}
+quiz20 <- readr::read_csv("pml-testing.csv", na = c("", "NA", "#DIV/0!"),
+                           col_types = spec(weightlift) # for consistent loading
+                           )
+readr::problems(quiz20)
+
+quiz20 <- dplyr::mutate(
+    quiz20,
+    timestamp = as.numeric(
+        paste(raw_timestamp_part_1, raw_timestamp_part_2, sep = "." )
+        )
+    )
+```
+
+```{r quiz_prediction, results = 'hide'}
+quiz_prediction <- predict(time_rf3, quiz20)
+quiz_prediction
+```
+
+```{r quiz_actual, include = FALSE}
+quiz_actual <- c('B', 'A', 'B', 'A', 'A', 'E', 'D', 'B', 'A', 'A',
+                 'B', 'C', 'B', 'A', 'E', 'E', 'A', 'B', 'B', 'B')
+
+all(quiz_prediction == quiz_actual)
+```
+
+# Model 2 - ????
 
 ```{r load_examine_NA, include = FALSE}
 # Return total (& percent) NA's in data frame and plot of percent NA's by column
@@ -90,45 +243,118 @@ examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
     # return useful variables invisibly
     invisible(
         list(
-            df_NA_present = df_NA, # TRUE if position in df is NA
-            df_total_NA = ttl_NA,
-            col_total_NA = purrr::map_int(df_NA, sum), # count of NA per column
-            col_pct_NA = NA_by_col # percent of NA per column
+            df_NA_lgl = df_NA, # TRUE if position in df is NA
+            df_NA_n = ttl_NA,
+            col_NA_n = purrr::map_int(df_NA, sum), # count of NA per column
+            col_NA_pct = NA_by_col # percent of NA per column
         )
     )
     
 }
 ```
 
-
+Custom function returns total # of NA values in data frame and plots % NA by variable
 ```{r missing, fig.width = 4, fig.height = 3}
-# returns total # of NA values in data.frame and plots % NA by variable
-NA_info <- examine_NA(df = training, ylab = "Number of Columns")
+wl_train_NA <- examine_NA(df = wl_train, ylab = "Number of Columns")
 ```
 
-```{r}
-col_n_NA[col_n_NA > 50
-
-training_60 <- dplyr::select_if(training, col_n_NA < 5000)
+Number of actual values (_i.e._ not NA) in each column that's missing most data.
+```{r vals_in_hi_NA_cols}
+summary(nrow(wl_train) - wl_train_NA$col_NA_n[wl_train_NA$col_NA_pct > 50])
 ```
 
-```{r missing2}
-train60_NA <- purrr::map_dfc(training_60, is.na)
+remove time and high NA columns (probably from sliding window computations but imputation too difficult, probably not enough calculated data to train model with sufficient accuracy for quiz)
 
-# total NA values remaining
-as.matrix(train60_NA) %>%
-    sum()
+```{r rmv_NA_vars}
+keep_vars <- wl_train_NA$col_NA_pct < 50 &
+                !grepl("time|window|X1|user", names(wl_train))
+
+wl_sensor <- dplyr::select(weightlift, names(keep_vars)[keep_vars])
+
+snsr_train <- wl_sensor[inTrain, ]
+snsr_test <- wl_sensor[-inTrain, ]
 ```
 
-```{r filter_NA}
-training_60 <- dplyr::filter(training_60, ~apply(., 1, all))
+```{r doParallel2, include = FALSE}
+cl <- parallel::makeCluster(parallel::detectCores() - 1)
+doParallel::registerDoParallel(cl)
 ```
+
+```{r multinomial_log_regression, include = FALSE}
+snsr_mlr <- train(classe ~ ., method = "multinom", data = snsr_train,
+                   trControl = fitControl,
+                   trace = FALSE)
+snsr_mlr
+```
+
+```{r lda, include = FALSE}
+snsr_lda <- train(classe ~ ., method = "lda", data = snsr_train,
+                   trControl = fitControl)
+snsr_lda
+```
+
+```{r steplda, include = FALSE}
+snsr_slda <- train(classe ~ ., method = "stepLDA", data = snsr_train,
+                    trControl = fitControl)
+
+# defaults see [stepclass()](https://www.rdocumentation.org/packages/klaR/versions/0.6-12/topics/stepclass)
+#   - maxvar = Inf
+#   - direction = "both"
+#   - criterion = "CR" 
+snsr_slda
+```
+
+```{r best_vars, include = FALSE}
+# trying to determine which vars were best for each model
+#   Only figured out stepwise LDA
+snsr_mlr$finalModel
+snsr_lda$finalModel
+snsr_slda$finalModel$model # used only 2 vars but stopped at 40% correctness rate
+```
+
+```{r snsr_oob, include = FALSE}
+oob_accuracy(snsr_test, classe, snsr_mlr, snsr_lda, snsr_slda)
+```
+
+```{r DEregisterCluster2, include = FALSE}
+stopCluster(cl)
+registerDoSEQ()
+```
+
+
+Use `parRF` = random forest with automatic feature selection
+```{r doParallel3, include = FALSE}
+cl <- parallel::makeCluster(parallel::detectCores() - 1)
+doParallel::registerDoParallel(cl)
+```
+
+```{r snsr_rf}
+snsr_parRF <- train(classe ~ ., method = "parRF",
+                    data = snsr_train,
+                    trControl = fitControl
+                    )
+snsr_parRF
+```
+
+```{r DEregisterCluster3, include = FALSE}
+stopCluster(cl)
+registerDoSEQ()
+```
+
 
 # Model Training & Evaluation
 describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did
 
+```{r snsr_mdl}
+oob_accuracy(snsr_test, classe, snsr_parRF)
+
+rf_importance(snsr_parRF$finalModel$importance)
+```
+
+
 # Appendix (for Reproducibility)
 
+## `examine_NA`
 ```{r show_examine_NA, eval = FALSE}
 # Return total (& percent) NA's in data frame and plot of percent NA's by column
 
@@ -181,12 +407,48 @@ examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
     # return useful variables invisibly
     invisible(
         list(
-            df_NA_present = df_NA, # TRUE if position in df is NA
-            df_total_NA = ttl_NA,
-            col_total_NA = purrr::map_int(df_NA, sum), # count of NA per column
-            col_pct_NA = NA_by_col # percent of NA per column
+            df_NA_lgl = df_NA, # TRUE if position in df is NA
+            df_NA_n = ttl_NA,
+            col_NA_n = purrr::map_int(df_NA, sum), # count of NA per column
+            col_NA_pct = NA_by_col # percent of NA per column
         )
     )
     
+}
+```
+
+## `rf_importance`
+```{r show_rf_importance, eval = FALSE}
+rf_importance <- function(importance) {
+    importance %>%
+        as.data.frame() %>%
+        tibble::rownames_to_column(var = "feature") %>%
+        dplyr::arrange(desc(MeanDecreaseGini)) %>%
+        dplyr::mutate(MeanDecreaseGini = round(MeanDecreaseGini, 2))
+}
+```
+
+## `oob_accuracy`
+```{r show_oob_accuracy, include = FALSE}
+oob_accuracy <- function(test_set, outcome_var, ..., accuracy_only = TRUE) {
+    # ... = models from caret::train()
+    # accuracy_only = if FALSE, returns accuracy and data.frame of raw predictions
+    
+    library(purrr)
+
+    model_names <- map_chr(as.list(substitute(list(...)))[-1L], deparse)
+    model <- list(...)
+    
+    outcome <- eval(substitute(outcome_var), test_set, parent.frame())
+    pred_list <- map(eval(model), .f = predict, newdata = test_set)
+    accuracy <- map_dbl(pred_list, ~sum(. == outcome)/length(outcome))
+    names(accuracy) <- model_names
+    
+    if (accuracy_only) {
+        return(accuracy)
+    } else {
+        names(pred_list) <- model_names
+        return(list(accuracy = accuracy, prediction = as.data.frame(pred_list)))
+    }
 }
 ```
