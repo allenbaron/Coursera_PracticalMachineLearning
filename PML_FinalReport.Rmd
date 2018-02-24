@@ -11,7 +11,13 @@ library(doParallel)
 ```
 
 # Executive Summary
-This report summarizes the development of algorithms to predict with high accuracy the type of weightlift curl completed by participants using data provided by _Velloso, E., et al_. 
+This report summarizes the development of algorithms to predict with high accuracy the type of weightlift curl (`classe`) completed by participants using data provided by _Velloso, E., et al_. Two key goals are achieved in this report by differing algorithms:
+
+- **Goal 1:** Predict the curl `classe` correctly for all 20 observations on the final quiz for the **Coursera: Practical Machine Learning** course
+    - **Model:** Random forest trained solely on "metafeatures" (_i.e._ features in the data the describe how the data was collected: `user_name` and time-related features).
+- **Goal 2:** Maximize prediction accuracy of the curl `classe` using data that _could_ be generated in a _quasi_real-life scenario.
+    - **Model 1:** Random forest trained on all raw data
+    - **Model 2:** Random forest trained on _ONLY_ data collected from sensors on the forearm (because forearm sensors in activity trackers and smart watches are fairly common, while other sensors would need
 
 The primary goal, to predict the curl type of 20 observations as part of the final quiz for the Coursera: Practical Machine Learning course, is achieved using a random forest (accuracy $\geq$ 99%) trained using only the name of participants and time-based variables. A secondary and more "real-life" goal, to predict the curl type accurately using variables measured by various sensors, is achieved with ...
 
@@ -22,12 +28,13 @@ _Velloso, E., et al_ collected accelerometer, gyrometer, and magnetometer data f
 
 ![](on-body-sensing-schema.png){ width=20% }
 
-Here, the data of _Velloso, E., et al_ is used to develop algorithms to predict which type of bicep curl is completed with 2 goals:
+Here, the data of _Velloso, E., et al_ is used to develop algorithms to predict which type of bicep curl, with 2 main goals:
 
-- The primary goal is to utilize the data provided to correctly predict the curl type of 20 observations selected from the data by instructors for the final quiz for the Coursera: Practical Machine Learning course. To accomplish this with 95% confidence that all 20 will be correct (assuming a strict bonferroni correction) the model accuracy must be at least $1 - \frac{0.05}{20}$ = `r round(1- 0.05/20, 4)`. This assumes independence among the 20 observations, which is unlikely (but makes the calculation possible).
-- The secondary goal is to create an algorithm that _might_ be used in a production environment to provide real-time feedback to weight lifters about the quality of their bicep curl. Although the average person would likely not have access to so many sensors, there is no attempt to limit which sensors the model is trained with.
+1. To accurately predict the curl type of 20 observations selected randomly as a final quiz for the Coursera: Practical Machine Learning course.
+    - To correctly type all 20 observations with 95% confidence the model accuracy must be at least $1 - \frac{0.05}{20}$ = `r round(1- 0.05/20, 4)` (using a bonferroni correction). This assumes independence among the 20 observations, which is unlikely, but it makes a rough estimation possible.
+2. To create an algorithm that _could_ be used in a production environment to provide real-time feedback to weight lifters about the quality of their bicep curl. Although the average person would likely not have access to so many sensors, there is no attempt to limit which sensor data the model is trained on.
 
-# Exploratory Analysis and Feature Selection
+# Data Import and Formatting
 ```{r import_data, results = 'hold', message = FALSE, warning = FALSE}
 weightlift <- readr::read_csv(
     "pml-training.csv",
@@ -351,6 +358,42 @@ oob_accuracy(snsr_test, classe, snsr_parRF)
 rf_importance(snsr_parRF$finalModel$importance)
 ```
 
+```{r train_forearm}
+# train on forearm info only
+
+# get data (no NA, forearm only)
+forearm_keep <- wl_train_NA$col_NA_pct < 50 &
+    grepl("forearm", names(wl_train))
+wl_forearm <- dplyr::select(weightlift, classe, names(forearm_keep)[forearm_keep])
+
+# split data
+forearm_train <- wl_forearm[inTrain, ]
+forearm_test <- wl_forearm[-inTrain, ]
+```
+
+```{r doParallel_forearm, include = FALSE}
+cl <- parallel::makeCluster(parallel::detectCores() - 1)
+doParallel::registerDoParallel(cl)
+```
+
+```{r forearm_rf}
+forearm_parRF <- train(classe ~ ., method = "parRF",
+                    data = forearm_train,
+                    trControl = fitControl
+                    )
+forearm_parRF
+```
+
+```{r DEregisterCluster_forearm, include = FALSE}
+stopCluster(cl)
+registerDoSEQ()
+```
+
+```{r forearm_results}
+oob_accuracy(forearm_test, classe, forearm_parRF)
+
+rf_importance(forearm_parRF$finalModel$importance)
+```
 
 # Appendix (for Reproducibility)
 
