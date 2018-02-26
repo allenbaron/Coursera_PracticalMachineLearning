@@ -1,7 +1,7 @@
 ---
 title: "Final Project - Practical Machine Learning, Coursera"
-subtitle: "Predicting Curling Activity with Machine Learning"
 author: "Allen Baron"
+subtitle: Predicting Curling Activity with Machine Learning
 output: html_notebook
 ---
 
@@ -14,13 +14,14 @@ library(doParallel)
 # Introduction
 My primary goal with this project is to predict the type of weightlift curl (`classe` variable) with sufficient accuracy to correctly predict all 20 observations on the final quiz for the **Coursera: Practical Machine Learning** course. The data comes from the work of _[Velloso, E., et al.](#cite)_ and includes accelerometer, gyrometer, and magnetometer measurements at each of the locations detailed in the image below for 5 different types of weightlift curl where the correct procedure is labelled `A` and 4 other incorrect procedures are `B`-`E`.
 
-![](on-body-sensing-schema.png){ width=20% }
+<div style="text-align:center" markdown="1">
+![**Sensor Locations**](on-body-sensing-schema.png){ width=20% }
+</div>
 
-To predict all 20 observations with 95% confidence, I _conservatively_ estimate a final model will need to have an accuracy of $1 - \frac{0.05}{20}$ = `r round(1- 0.05/20, 4)` (bonferroni correction). This essentially means the final out-of-sample error rate must be less than `r round(0.05/20, 4)` ($1 - accuracy$).
-
-> To learn more about the estimate see [FWER - Controlling Procedures](https://en.wikipedia.org/wiki/Family-wise_error_rate#Controlling_procedures).
+To predict all 20 observations with 95% confidence, I estimate the final model will need to have an accuracy of $1 - \frac{0.05}{20}$ = `r round(1- 0.05/20, 4)` ([bonferroni correction](https://en.wikipedia.org/wiki/Family-wise_error_rate#Controlling_procedures)). This essentially means the final out-of-sample error rate must be less than `r round(0.05/20, 4)` ($1 - accuracy$).
 
 After importing the training data without errors, I split the data into training and testing sets (to later provide out-of-sample error estimates).
+
 ```{r import_data, results = 'hide', message = FALSE, warning = FALSE}
 weightlift <- readr::read_csv(
     "pml-training.csv",
@@ -43,13 +44,15 @@ wl_train <- weightlift[inTrain, ]
 wl_test <- weightlift[-inTrain, ]
 ```
 
-At first glance, I discovered the presence of what I call "metafeatures" (_i.e._ features that describe how the data was collected, such as `user_name`, `num_window`, and `cvtd_timestamp`). Because any individual participant can only complete one activity at a time, it seems reasonable to guess that I can train a model with high accuracy based solely on metafeatures. For curiosity's sake, I'll train two different models: the [first](#model1) on metafeatures, and the [second](#model2) strictly with sensor measurements which is what I would expect to use in a real world application.
+This data set has what I call "metafeatures" (_i.e._ features that describe how the data was collected, such as `user_name`, `num_window`, and `cvtd_timestamp`). Because any individual participant can only complete one activity at a time, it seems reasonable to guess that a model trained solely on metafeatures will have very high accuracy (for the final quiz predictions).
+
+For curiosity's sake, I'll train two different models: the **[first](#model1)** on metafeatures, and the **[second](#model2)** strictly with sensor measurements, which is what I would expect to use in a real world application.
 
 # Cross validation & Out-of-sample error procedures
-For both models I will use 10-fold cross-validation for training the model based on the recommendation of [Max Kuhn](http://appliedpredictivemodeling.com/blog/2014/11/27/vpuig01pqbklmi72b8lcl3ij5hj2qm) and then will estimate out-of-sample accuracy/error using 30% of the data provided.
+For all of the models I use 10-fold cross-validation for training, based on the recommendation of [Max Kuhn](http://appliedpredictivemodeling.com/blog/2014/11/27/vpuig01pqbklmi72b8lcl3ij5hj2qm), and then estimate out-of-sample accuracy/error using 30% of the data set aside at the outset.
 
 # Model 1 - Training on Metafeatures {#model1}
-Combining `user_name` with at least one time-based variable will likely be enough to predict `classe` with high accuracy. The `cvtd_timestamp` values are probably too homogeneous (only `r wl_train$cvtd_timestamp %>% unique() %>% length()` unique values). The raw timestamps combined (now `timestamp`) provide a unique value for each observation and appear to provide sufficient separation to build a model. I will train a random forest algorithm because they generally perform well on classification problems out of the box.
+Combining `user_name` with at least one time-based variable will likely be enough to predict `classe` with high accuracy. The `cvtd_timestamp` values are probably too homogeneous (there are only `r wl_train$cvtd_timestamp %>% unique() %>% length()` unique values) but the raw timestamp features combined (now `timestamp`) provide a unique value for each observation and appear to provide sufficient separation to build a model.
 
 ```{r time_plot}
 wl_train <- dplyr::mutate(
@@ -61,10 +64,11 @@ wl_train <- dplyr::mutate(
     
 ggplot2::ggplot(data = wl_train, aes(x = classe, y = timestamp)) +
     geom_boxplot() +
-    facet_wrap(~user_name, scales = "free")
+    facet_wrap(~user_name, scales = "free") +
+    ggtitle("Separation of `classe` type by user and timestamp", subtitle = NULL)
 ```
 
-The resulting model is extremely accurate but doesn't quite reach the desired accuracy threshold. Including 1 or more additional "metafeatures" I expect would put the model over that threshold.
+I will train a random forest algorithm because they generally perform well on classification problems out of the box.
 
 ```{r time_rf}
 # Register cluster for parallel computation
@@ -82,35 +86,12 @@ time_rf <- train(classe ~ user_name + timestamp, method = "rf", data = wl_train,
 time_rf
 ```
 
-Among the remaining "metafeatures", `num_window` has the most unique values so it will probably do the job.
+The resulting model is extremely accurate but doesn't quite reach the desired accuracy threshold. I suspect including 1 or more additional "metafeatures" would put the model over that threshold. Among those, `num_window` has the most unique values so I'll use it.
 
 ```{r most_unique_vals}
 wl_train %>%
     select(contains("cvtd"), contains("window")) %>%
     purrr::map_int(~length(unique(.)))
-```
-
-
-```{r time_rf_all, include = FALSE}
-time_rf_all <- train(classe ~ user_name + timestamp + num_window + new_window + cvtd_timestamp, method = "rf", data = wl_train,
-                       trControl = fitControl
-                       )
-time_rf_all
-```
-
-
-```{r load_rf_importance, include = FALSE}
-rf_importance <- function(importance) {
-    importance %>%
-        as.data.frame() %>%
-        tibble::rownames_to_column(var = "feature") %>%
-        dplyr::arrange(desc(MeanDecreaseGini)) %>%
-        mutate(MeanDecreaseGini = round(MeanDecreaseGini, 2))
-}
-```
-
-```{r time_importance, include = FALSE}
-rf_importance(time_rf_all$finalModel$importance)
 ```
 
 ```{r time_rf3}
@@ -125,6 +106,7 @@ stopCluster(cl)
 registerDoSEQ()
 ```
 
+### Final Metafeature Model Accuracy and Error {#rf3}
 The retrained model approaches perfect classification on both the training and testing set. It also performed flawlessly on the quiz (not shown).
 ```{r time_rf3_eval, results = 'asis'}
 # add timestamp feature to testing set
@@ -149,9 +131,21 @@ knitr::kable(tibble(
     ))
 ```
 
+```{r quiz, include = FALSE}
+quiz_actual <- c("B", "A", "B", "A", "A", "E", "D", "B", "A", "A",
+                 "B", "C", "B", "A", "E", "E", "A", "B", "B", "B")
 
-```{r, include = FALSE}
-oob_accuracy(wl_test, classe, time_rf, time_rf_all, time_rf3)
+quiz20 <- readr::read_csv("pml-testing.csv", na = c("", "NA", "#DIV/0!"),
+    col_types = spec(weightlift)) # for loading consistency
+
+quiz20 <- dplyr::mutate(
+    quiz20,
+    timestamp = as.numeric(
+        paste(raw_timestamp_part_1, raw_timestamp_part_2, sep = "." )
+        )
+    )
+
+sum(predict(time_rf3, quiz20) == quiz_actual)
 ```
 
 
@@ -175,7 +169,7 @@ examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
         return("No NA values in data set")
     }
     # print total & proportion NA
-    print(
+    message(
         paste(
             ttl_NA, "NA values of", ttl_obs, "observations =",
             round(ttl_NA/ttl_obs*100, 2), "percent."
@@ -219,30 +213,26 @@ examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
 }
 ```
 
-```{r missing, fig.width = 4, fig.height = 3}
+```{r missing, fig.width = 4, fig.height = 3, fig.align = "center"}
 wl_train_NA <- examine_NA(df = wl_train, ylab = "Number of Columns")
 ```
-While those 100 features may be useful for application in a real world context (a partial goal of this model), they will probably not be useful for predicting the 20 quiz observations (still a goal for this model). Also, missing values are problematic for machine learning algorithms and these are not easily imputed in a meaningful way (maybe the easiest approach would be duplication but would it be helpful?). The best approach, then, for training a real world model (that still works for the quiz) is to remove features with missing data along with the metafeatures. That leaves the data set with 52 features to train on.
+While those 100 features may be useful for application in a real world context (a partial goal of this model), they will probably not be useful for predicting the 20 quiz observations. Also, missing values are problematic for machine learning algorithms and these are not easily imputed in a meaningful way (maybe the easiest approach would be duplication, but would it be helpful?). The best approach, then, for training a real world model (that still works for the quiz) is to remove features with missing data along with the metafeatures.
 
 ```{r rmv_NA_vars}
 keep_vars <- wl_train_NA$col_NA_pct < 50 &
                 !grepl("time|window|X1|user", names(wl_train))
 
-wl_sensor <- dplyr::select(weightlift, names(keep_vars)[keep_vars])
-
-snsr_train <- wl_sensor[inTrain, ]
-snsr_test <- wl_sensor[-inTrain, ]
+snsr_train <- dplyr::select(wl_train, names(keep_vars)[keep_vars])
 ```
 
-I expect a random forest algorithm would again perform best here but I'll compare that against multinomial logistic regression, linear discriminant analysis (LDA), and step-wise LDA.
+That leaves the data set with 52 features to train on. I expect a random forest algorithm would again perform best here but I'll compare that against multinomial logistic regression, linear discriminant analysis (LDA), and step-wise LDA.
 ```{r doParallel2, include = FALSE}
 cl <- parallel::makeCluster(parallel::detectCores() - 1)
 doParallel::registerDoParallel(cl)
 ```
 
 ```{r real_models}
-snsr_rf <- train(classe ~ ., method = "rf",
-                    data = snsr_train,
+snsr_rf <- train(classe ~ ., method = "rf", data = snsr_train,
                     trControl = fitControl
                     )
 
@@ -286,11 +276,19 @@ oob_accuracy <- function(test_set, outcome_var, ..., accuracy_only = TRUE) {
 }
 ```
 
-Based on the out-of-sample accuracy of each model (supplied by [`oob_accuracy`](#oob), the random forest algorithm definitely performed the best.
-```{r snsr_oob}
-oob_accuracy(snsr_test, classe, snsr_rf, snsr_mlr, snsr_lda, snsr_slda)
+### Final Sensor Model Accuracies and Errors
+Based on the out-of-sample accuracy of each model (supplied by [`oob_accuracy`](#oob)), the random forest algorithm definitely performed the best.
+```{r snsr_oob, results = "asis"}
+snsr_test <- dplyr::select(wl_test, names(keep_vars)[keep_vars])
+
+knitr::kable(oob_accuracy(snsr_test, classe, snsr_rf, snsr_mlr, snsr_lda, snsr_slda) %>%
+    data.frame(accuracy = .) %>%
+    tibble::rownames_to_column(var = "model") %>%
+    dplyr::mutate(error = 1 - accuracy) %>%
+    dplyr::arrange(error))
 ```
-I'm impressed that it achieved an accuracy that was close to that of the 3-metafeature random forest. Like that model it correctly predicted all 20 observations on the final quiz, while the other algorithms would not have obtained a passing grade (`snsr_mlr` = 15 correct, `snsr_lda` = 14, and `snsr_slda` = 9).
+I'm impressed that it achieved an accuracy that was close to that of the [3-metafeature random forest](#rf3). Like that model it correctly predicted `r sum(predict(snsr_rf, quiz20) == quiz_actual)` observations on the final quiz, while the other algorithms would not have obtained a passing grade (`snsr_mlr` = `r sum(predict(snsr_mlr, quiz20) == quiz_actual)`
+ correct, `snsr_lda` = `r sum(predict(snsr_lda, quiz20) == quiz_actual)`, and `snsr_slda` = `r sum(predict(snsr_slda, quiz20) == quiz_actual)`).
  
 # Appendix
 
@@ -318,7 +316,7 @@ examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
         return("No NA values in data set")
     }
     # print total & proportion NA
-    print(
+    message(
         paste(
             ttl_NA, "NA values of", ttl_obs, "observations =",
             round(ttl_NA/ttl_obs*100, 2), "percent."
@@ -387,7 +385,7 @@ oob_accuracy <- function(test_set, outcome_var, ..., accuracy_only = TRUE) {
 }
 ```
 
-## Reproducibility Info
+## For Reproducibility
 ```{r}
 sessionInfo()
 ```
