@@ -1,6 +1,7 @@
 ---
-title: "Predicting Curling Activity with Machine Learning"
-subtitle: "Final Project - Practical Machine Learning, Couersera"
+title: "Final Project - Practical Machine Learning, Coursera"
+subtitle: "Predicting Curling Activity with Machine Learning"
+author: "Allen Baron"
 output: html_notebook
 ---
 
@@ -10,38 +11,23 @@ library(caret)
 library(doParallel)
 ```
 
-# Executive Summary
-This report summarizes the development of algorithms to predict with high accuracy the type of weightlift curl (`classe`) completed by participants using data provided by _Velloso, E., et al_. Two key goals are achieved in this report by differing algorithms:
-
-- **Goal 1:** Predict the curl `classe` correctly for all 20 observations on the final quiz for the **Coursera: Practical Machine Learning** course
-    - **Model:** Random forest trained solely on "metafeatures" (_i.e._ features in the data the describe how the data was collected: `user_name` and time-related features).
-- **Goal 2:** Maximize prediction accuracy of the curl `classe` using data that _could_ be generated in a _quasi_real-life scenario.
-    - **Model 1:** Random forest trained on all raw data
-    - **Model 2:** Random forest trained on _ONLY_ data collected from sensors on the forearm (because forearm sensors in activity trackers and smart watches are fairly common, while other sensors would need
-
-The primary goal, to predict the curl type of 20 observations as part of the final quiz for the Coursera: Practical Machine Learning course, is achieved using a random forest (accuracy $\geq$ 99%) trained using only the name of participants and time-based variables. A secondary and more "real-life" goal, to predict the curl type accurately using variables measured by various sensors, is achieved with ...
-
-- include final algorithm(s) & essential attributes: accuracy, features, etc.
-
 # Introduction
-_Velloso, E., et al_ collected accelerometer, gyrometer, and magnetometer data from each location detailed in the image below for 5 types of unilateral dumbbell weightlift curl (A-E), where A was the correct procedure and B-E represented specific errors: B = moving elbow forward, C = lifting only halfway, D = lowering only halfway, and E = moving hips forward. For more details, see _Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. [Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/har#ixzz57fKGqFGo). Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013._
+My primary goal with this project is to predict the type of weightlift curl (`classe` variable) with sufficient accuracy to correctly predict all 20 observations on the final quiz for the **Coursera: Practical Machine Learning** course. The data comes from the work of _[Velloso, E., et al.](#cite)_ and includes accelerometer, gyrometer, and magnetometer measurements at each of the locations detailed in the image below for 5 different types of weightlift curl where the correct procedure is labelled `A` and 4 other incorrect procedures are `B`-`E`.
 
 ![](on-body-sensing-schema.png){ width=20% }
 
-Here, the data of _Velloso, E., et al_ is used to develop algorithms to predict which type of bicep curl, with 2 main goals:
+To predict all 20 observations with 95% confidence, I _conservatively_ estimate a final model will need to have an accuracy of $1 - \frac{0.05}{20}$ = `r round(1- 0.05/20, 4)` (bonferroni correction). This essentially means the final out-of-sample error rate must be less than `r round(0.05/20, 4)` ($1 - accuracy$).
 
-1. To accurately predict the curl type of 20 observations selected randomly as a final quiz for the Coursera: Practical Machine Learning course.
-    - To correctly type all 20 observations with 95% confidence the model accuracy must be at least $1 - \frac{0.05}{20}$ = `r round(1- 0.05/20, 4)` (using a bonferroni correction). This assumes independence among the 20 observations, which is unlikely, but it makes a rough estimation possible.
-2. To create an algorithm that _could_ be used in a production environment to provide real-time feedback to weight lifters about the quality of their bicep curl. Although the average person would likely not have access to so many sensors, there is no attempt to limit which sensor data the model is trained on.
+> To learn more about the estimate see [FWER - Controlling Procedures](https://en.wikipedia.org/wiki/Family-wise_error_rate#Controlling_procedures).
 
-# Data Import and Formatting
-```{r import_data, results = 'hold', message = FALSE, warning = FALSE}
+After importing the training data without errors, I split the data into training and testing sets (to later provide out-of-sample error estimates).
+```{r import_data, results = 'hide', message = FALSE, warning = FALSE}
 weightlift <- readr::read_csv(
     "pml-training.csv",
     na = c("", "NA", "#DIV/0!"),
     col_types = cols(
         .default = col_double(),
-        cvtd_timestamp = col_date("%d/%m/%Y %H:%M"),
+        cvtd_timestamp = col_datetime("%d/%m/%Y %H:%M"),
         user_name = col_factor(
             levels = c("carlitos", "pedro", "adelmo", "charles", "eurico", "jeremy")
             ),
@@ -50,21 +36,20 @@ weightlift <- readr::read_csv(
         )
     )
 
-readr::problems(weightlift)
-```
+readr::problems(weightlift) # import errors - none present
 
-```{r split_for_oob}
 inTrain <- caret::createDataPartition(weightlift$X1, p = 0.7, list = FALSE)
 wl_train <- weightlift[inTrain, ]
 wl_test <- weightlift[-inTrain, ]
 ```
 
+At first glance, I discovered the presence of what I call "metafeatures" (_i.e._ features that describe how the data was collected, such as `user_name`, `num_window`, and `cvtd_timestamp`). Because any individual participant can only complete one activity at a time, it seems reasonable to guess that I can train a model with high accuracy based solely on metafeatures. For curiosity's sake, I'll train two different models: the [first](#model1) on metafeatures, and the [second](#model2) strictly with sensor measurements which is what I would expect to use in a real world application.
 
-# Model 1 - Training on User + Time
+# Cross validation & Out-of-sample error procedures
+For both models I will use 10-fold cross-validation for training the model based on the recommendation of [Max Kuhn](http://appliedpredictivemodeling.com/blog/2014/11/27/vpuig01pqbklmi72b8lcl3ij5hj2qm) and then will estimate out-of-sample accuracy/error using 30% of the data provided.
 
-participants can't do all 5 activities at same time, can likely predict well by `user_name` and time-related variables only.
-
-describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did
+# Model 1 - Training on Metafeatures {#model1}
+Combining `user_name` with at least one time-based variable will likely be enough to predict `classe` with high accuracy. The `cvtd_timestamp` values are probably too homogeneous (only `r wl_train$cvtd_timestamp %>% unique() %>% length()` unique values). The raw timestamps combined (now `timestamp`) provide a unique value for each observation and appear to provide sufficient separation to build a model. I will train a random forest algorithm because they generally perform well on classification problems out of the box.
 
 ```{r time_plot}
 wl_train <- dplyr::mutate(
@@ -79,24 +64,32 @@ ggplot2::ggplot(data = wl_train, aes(x = classe, y = timestamp)) +
     facet_wrap(~user_name, scales = "free")
 ```
 
-```{r doParallel}
+The resulting model is extremely accurate but doesn't quite reach the desired accuracy threshold. Including 1 or more additional "metafeatures" I expect would put the model over that threshold.
+
+```{r time_rf}
+# Register cluster for parallel computation
 cl <- parallel::makeCluster(parallel::detectCores() - 1)
 doParallel::registerDoParallel(cl)
-```
 
-see Max Kuhn's analysis
-```{r}
+# set 10-fold CV
 fitControl <- trainControl(method = "cv",
                            number = 10,
                            allowParallel = TRUE)                         
-```
-
-```{r time_rf}
-time_rf <- train(classe ~ user_name + timestamp,method = "rf", data = wl_train,
+# train model
+time_rf <- train(classe ~ user_name + timestamp, method = "rf", data = wl_train,
                        trControl = fitControl
                        )
 time_rf
 ```
+
+Among the remaining "metafeatures", `num_window` has the most unique values so it will probably do the job.
+
+```{r most_unique_vals}
+wl_train %>%
+    select(contains("cvtd"), contains("window")) %>%
+    purrr::map_int(~length(unique(.)))
+```
+
 
 ```{r time_rf_all, include = FALSE}
 time_rf_all <- train(classe ~ user_name + timestamp + num_window + new_window + cvtd_timestamp, method = "rf", data = wl_train,
@@ -104,6 +97,7 @@ time_rf_all <- train(classe ~ user_name + timestamp + num_window + new_window + 
                        )
 time_rf_all
 ```
+
 
 ```{r load_rf_importance, include = FALSE}
 rf_importance <- function(importance) {
@@ -115,89 +109,54 @@ rf_importance <- function(importance) {
 }
 ```
 
-```{r time_importance}
+```{r time_importance, include = FALSE}
 rf_importance(time_rf_all$finalModel$importance)
 ```
 
-```{r time_rf3, include = FALSE}
+```{r time_rf3}
 time_rf3 <- train(classe ~ user_name + timestamp + num_window,
                    method = "rf",
                    data = wl_train,
                    trControl = fitControl
                    )
-time_rf3
-```
 
-```{r DEregisterCluster}
+# Deregister cluster
 stopCluster(cl)
 registerDoSEQ()
 ```
 
-```{r prep_test}
+The retrained model approaches perfect classification on both the training and testing set. It also performed flawlessly on the quiz (not shown).
+```{r time_rf3_eval, results = 'asis'}
+# add timestamp feature to testing set
 wl_test <- dplyr::mutate(
     wl_test,
     timestamp = as.numeric(
         paste(raw_timestamp_part_1, raw_timestamp_part_2, sep = "." )
         )
     )
+
+# training set accuracy
+train_acc <- max(time_rf3$results$Accuracy)
+
+# out-of-sample accuracy/error for testing set
+test_acc <- predict(time_rf3, newdata = wl_test) %>%
+    {sum(. == wl_test$classe) / nrow(wl_test)}
+
+knitr::kable(tibble(
+    dataset = c("training", "testing"),
+    accuracy = c(train_acc, test_acc),
+    error = 1 - accuracy
+    ))
 ```
 
-```{r load_oob_accuracy, include = FALSE}
-oob_accuracy <- function(test_set, outcome_var, ..., accuracy_only = TRUE) {
-    # ... = models from caret::train()
-    # accuracy_only = if FALSE, returns accuracy and data.frame of raw predictions
-    
-    library(purrr)
 
-    model_names <- map_chr(as.list(substitute(list(...)))[-1L], deparse)
-    model <- list(...)
-    
-    outcome <- eval(substitute(outcome_var), test_set, parent.frame())
-    pred_list <- map(eval(model), .f = predict, newdata = test_set)
-    accuracy <- map_dbl(pred_list, ~sum(. == outcome)/length(outcome))
-    names(accuracy) <- model_names
-    
-    if (accuracy_only) {
-        return(accuracy)
-    } else {
-        names(pred_list) <- model_names
-        return(list(accuracy = accuracy, prediction = as.data.frame(pred_list)))
-    }
-}
-```
-
-```{r}
+```{r, include = FALSE}
 oob_accuracy(wl_test, classe, time_rf, time_rf_all, time_rf3)
 ```
 
-```{r import_quiz, warning = FALSE}
-quiz20 <- readr::read_csv("pml-testing.csv", na = c("", "NA", "#DIV/0!"),
-                           col_types = spec(weightlift) # for consistent loading
-                           )
-readr::problems(quiz20)
 
-quiz20 <- dplyr::mutate(
-    quiz20,
-    timestamp = as.numeric(
-        paste(raw_timestamp_part_1, raw_timestamp_part_2, sep = "." )
-        )
-    )
-```
-
-```{r quiz_prediction, results = 'hide'}
-quiz_prediction <- predict(time_rf3, quiz20)
-quiz_prediction
-```
-
-```{r quiz_actual, include = FALSE}
-quiz_actual <- c('B', 'A', 'B', 'A', 'A', 'E', 'D', 'B', 'A', 'A',
-                 'B', 'C', 'B', 'A', 'E', 'E', 'A', 'B', 'B', 'B')
-
-all(quiz_prediction == quiz_actual)
-```
-
-# Model 2 - ????
-
+# Model 2 - Training on Sensor Data {#model2}
+The overall training data set has a large number of missing values which are concentrated  in about 100 of the features (see [`examine_NA`](#eNA) for code). 
 ```{r load_examine_NA, include = FALSE}
 # Return total (& percent) NA's in data frame and plot of percent NA's by column
 
@@ -260,17 +219,10 @@ examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
 }
 ```
 
-Custom function returns total # of NA values in data frame and plots % NA by variable
 ```{r missing, fig.width = 4, fig.height = 3}
 wl_train_NA <- examine_NA(df = wl_train, ylab = "Number of Columns")
 ```
-
-Number of actual values (_i.e._ not NA) in each column that's missing most data.
-```{r vals_in_hi_NA_cols}
-summary(nrow(wl_train) - wl_train_NA$col_NA_n[wl_train_NA$col_NA_pct > 50])
-```
-
-remove time and high NA columns (probably from sliding window computations but imputation too difficult, probably not enough calculated data to train model with sufficient accuracy for quiz)
+While those 100 features may be useful for application in a real world context (a partial goal of this model), they will probably not be useful for predicting the 20 quiz observations (still a goal for this model). Also, missing values are problematic for machine learning algorithms and these are not easily imputed in a meaningful way (maybe the easiest approach would be duplication but would it be helpful?). The best approach, then, for training a real world model (that still works for the quiz) is to remove features with missing data along with the metafeatures. That leaves the data set with 52 features to train on.
 
 ```{r rmv_NA_vars}
 keep_vars <- wl_train_NA$col_NA_pct < 50 &
@@ -282,45 +234,27 @@ snsr_train <- wl_sensor[inTrain, ]
 snsr_test <- wl_sensor[-inTrain, ]
 ```
 
+I expect a random forest algorithm would again perform best here but I'll compare that against multinomial logistic regression, linear discriminant analysis (LDA), and step-wise LDA.
 ```{r doParallel2, include = FALSE}
 cl <- parallel::makeCluster(parallel::detectCores() - 1)
 doParallel::registerDoParallel(cl)
 ```
 
-```{r multinomial_log_regression, include = FALSE}
+```{r real_models}
+snsr_rf <- train(classe ~ ., method = "rf",
+                    data = snsr_train,
+                    trControl = fitControl
+                    )
+
 snsr_mlr <- train(classe ~ ., method = "multinom", data = snsr_train,
                    trControl = fitControl,
                    trace = FALSE)
-snsr_mlr
-```
 
-```{r lda, include = FALSE}
 snsr_lda <- train(classe ~ ., method = "lda", data = snsr_train,
                    trControl = fitControl)
-snsr_lda
-```
 
-```{r steplda, include = FALSE}
 snsr_slda <- train(classe ~ ., method = "stepLDA", data = snsr_train,
                     trControl = fitControl)
-
-# defaults see [stepclass()](https://www.rdocumentation.org/packages/klaR/versions/0.6-12/topics/stepclass)
-#   - maxvar = Inf
-#   - direction = "both"
-#   - criterion = "CR" 
-snsr_slda
-```
-
-```{r best_vars, include = FALSE}
-# trying to determine which vars were best for each model
-#   Only figured out stepwise LDA
-snsr_mlr$finalModel
-snsr_lda$finalModel
-snsr_slda$finalModel$model # used only 2 vars but stopped at 40% correctness rate
-```
-
-```{r snsr_oob, include = FALSE}
-oob_accuracy(snsr_test, classe, snsr_mlr, snsr_lda, snsr_slda)
 ```
 
 ```{r DEregisterCluster2, include = FALSE}
@@ -328,76 +262,44 @@ stopCluster(cl)
 registerDoSEQ()
 ```
 
+```{r load_oob_accuracy, include = FALSE}
+oob_accuracy <- function(test_set, outcome_var, ..., accuracy_only = TRUE) {
+    # ... = models from caret::train()
+    # accuracy_only = if FALSE, returns accuracy and data.frame of raw predictions
+    
+    library(purrr)
 
-Use `parRF` = random forest with automatic feature selection
-```{r doParallel3, include = FALSE}
-cl <- parallel::makeCluster(parallel::detectCores() - 1)
-doParallel::registerDoParallel(cl)
+    model_names <- map_chr(as.list(substitute(list(...)))[-1L], deparse)
+    model <- list(...)
+    
+    outcome <- eval(substitute(outcome_var), test_set, parent.frame())
+    pred_list <- map(eval(model), .f = predict, newdata = test_set)
+    accuracy <- map_dbl(pred_list, ~sum(. == outcome)/length(outcome))
+    names(accuracy) <- model_names
+    
+    if (accuracy_only) {
+        return(accuracy)
+    } else {
+        names(pred_list) <- model_names
+        return(list(accuracy = accuracy, prediction = as.data.frame(pred_list)))
+    }
+}
 ```
 
-```{r snsr_rf}
-snsr_parRF <- train(classe ~ ., method = "parRF",
-                    data = snsr_train,
-                    trControl = fitControl
-                    )
-snsr_parRF
+Based on the out-of-sample accuracy of each model (supplied by [`oob_accuracy`](#oob), the random forest algorithm definitely performed the best.
+```{r snsr_oob}
+oob_accuracy(snsr_test, classe, snsr_rf, snsr_mlr, snsr_lda, snsr_slda)
 ```
+I'm impressed that it achieved an accuracy that was close to that of the 3-metafeature random forest. Like that model it correctly predicted all 20 observations on the final quiz, while the other algorithms would not have obtained a passing grade (`snsr_mlr` = 15 correct, `snsr_lda` = 14, and `snsr_slda` = 9).
+ 
+# Appendix
 
-```{r DEregisterCluster3, include = FALSE}
-stopCluster(cl)
-registerDoSEQ()
-```
+## Cited work {#cite}
+_Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. [Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/har#ixzz57fKGqFGo). Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13). Stuttgart, Germany: ACM SIGCHI, 2013._
 
+## Custom R functions
 
-# Model Training & Evaluation
-describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did
-
-```{r snsr_mdl}
-oob_accuracy(snsr_test, classe, snsr_parRF)
-
-rf_importance(snsr_parRF$finalModel$importance)
-```
-
-```{r train_forearm}
-# train on forearm info only
-
-# get data (no NA, forearm only)
-forearm_keep <- wl_train_NA$col_NA_pct < 50 &
-    grepl("forearm", names(wl_train))
-wl_forearm <- dplyr::select(weightlift, classe, names(forearm_keep)[forearm_keep])
-
-# split data
-forearm_train <- wl_forearm[inTrain, ]
-forearm_test <- wl_forearm[-inTrain, ]
-```
-
-```{r doParallel_forearm, include = FALSE}
-cl <- parallel::makeCluster(parallel::detectCores() - 1)
-doParallel::registerDoParallel(cl)
-```
-
-```{r forearm_rf}
-forearm_parRF <- train(classe ~ ., method = "parRF",
-                    data = forearm_train,
-                    trControl = fitControl
-                    )
-forearm_parRF
-```
-
-```{r DEregisterCluster_forearm, include = FALSE}
-stopCluster(cl)
-registerDoSEQ()
-```
-
-```{r forearm_results}
-oob_accuracy(forearm_test, classe, forearm_parRF)
-
-rf_importance(forearm_parRF$finalModel$importance)
-```
-
-# Appendix (for Reproducibility)
-
-## `examine_NA`
+### `examine_NA` {#eNA}
 ```{r show_examine_NA, eval = FALSE}
 # Return total (& percent) NA's in data frame and plot of percent NA's by column
 
@@ -460,19 +362,8 @@ examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
 }
 ```
 
-## `rf_importance`
-```{r show_rf_importance, eval = FALSE}
-rf_importance <- function(importance) {
-    importance %>%
-        as.data.frame() %>%
-        tibble::rownames_to_column(var = "feature") %>%
-        dplyr::arrange(desc(MeanDecreaseGini)) %>%
-        dplyr::mutate(MeanDecreaseGini = round(MeanDecreaseGini, 2))
-}
-```
-
-## `oob_accuracy`
-```{r show_oob_accuracy, include = FALSE}
+### `oob_accuracy` {#oob}
+```{r show_oob_accuracy, eval = FALSE}
 oob_accuracy <- function(test_set, outcome_var, ..., accuracy_only = TRUE) {
     # ... = models from caret::train()
     # accuracy_only = if FALSE, returns accuracy and data.frame of raw predictions
@@ -495,3 +386,9 @@ oob_accuracy <- function(test_set, outcome_var, ..., accuracy_only = TRUE) {
     }
 }
 ```
+
+## Reproducibility Info
+```{r}
+sessionInfo()
+```
+
