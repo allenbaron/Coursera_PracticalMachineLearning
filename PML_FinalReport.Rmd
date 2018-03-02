@@ -2,7 +2,13 @@
 title: "Final Project - Practical Machine Learning, Coursera"
 author: "Allen Baron"
 subtitle: Predicting Curling Activity with Machine Learning
-output: html_notebook
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
 ---
 
 ```{r libraries, include = FALSE}
@@ -12,7 +18,7 @@ library(doParallel)
 ```
 
 # Introduction
-My primary goal with this project is to predict the type of weightlift curl (`classe` variable) with sufficient accuracy to correctly predict all 20 observations on the final quiz for the **Coursera: Practical Machine Learning** course. The data comes from the work of _[Velloso, E., et al.](#cite)_ and includes accelerometer, gyrometer, and magnetometer measurements at each of the locations detailed in the image below for 5 different types of weightlift curl where the correct procedure is labelled `A` and 4 other incorrect procedures are `B`-`E`.
+My primary goal with this project is to predict the type of weightlift curl (`classe` variable) with sufficient accuracy to correctly predict all 20 observations on the final quiz for the **Coursera: Practical Machine Learning** course. The data comes from the work of _[Velloso, E., et al.](#cite)_ and includes accelerometer, gyrometer, and magnetometer measurements at each of the locations detailed in the image below for 5 different types of weightlift curl, where the correct procedure is labelled `A` and 4 other incorrect procedures are `B`-`E`.
 
 <div style="text-align:center" markdown="1">
 ![**Sensor Locations**](on-body-sensing-schema.png){ width=20% }
@@ -49,7 +55,7 @@ This data set has what I call "metafeatures" (_i.e._ features that describe how 
 For curiosity's sake, I'll train two different models: the **[first](#model1)** on metafeatures, and the **[second](#model2)** strictly with sensor measurements, which is what I would expect to use in a real world application.
 
 # Cross validation & Out-of-sample error procedures
-For all of the models I use 10-fold cross-validation for training, based on the recommendation of [Max Kuhn](http://appliedpredictivemodeling.com/blog/2014/11/27/vpuig01pqbklmi72b8lcl3ij5hj2qm), and then estimate out-of-sample accuracy/error using 30% of the data set aside at the outset.
+For all of the models I use 10-fold cross-validation for training, based on the recommendation of [Max Kuhn](http://appliedpredictivemodeling.com/blog/2014/11/27/vpuig01pqbklmi72b8lcl3ij5hj2qm), and then estimate out-of-sample accuracy/error using the 30% of the data set aside for testing earlier.
 
 # Model 1 - Training on Metafeatures {#model1}
 Combining `user_name` with at least one time-based variable will likely be enough to predict `classe` with high accuracy. The `cvtd_timestamp` values are probably too homogeneous (there are only `r wl_train$cvtd_timestamp %>% unique() %>% length()` unique values) but the raw timestamp features combined (now `timestamp`) provide a unique value for each observation and appear to provide sufficient separation to build a model.
@@ -169,7 +175,7 @@ examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
         return("No NA values in data set")
     }
     # print total & proportion NA
-    message(
+    print(
         paste(
             ttl_NA, "NA values of", ttl_obs, "observations =",
             round(ttl_NA/ttl_obs*100, 2), "percent."
@@ -213,10 +219,11 @@ examine_NA <- function(df, x_lim = NULL, bw = NULL, plot = TRUE, ...) {
 }
 ```
 
-```{r missing, fig.width = 4, fig.height = 3, fig.align = "center"}
+```{r missing, fig.height = 3, fig.width = 4}
 wl_train_NA <- examine_NA(df = wl_train, ylab = "Number of Columns")
 ```
-While those 100 features may be useful for application in a real world context (a partial goal of this model), they will probably not be useful for predicting the 20 quiz observations. Also, missing values are problematic for machine learning algorithms and these are not easily imputed in a meaningful way (maybe the easiest approach would be duplication, but would it be helpful?). The best approach, then, for training a real world model (that still works for the quiz) is to remove features with missing data along with the metafeatures.
+
+While those 100 features may be useful for application in a real world context (a partial goal of this model), they will probably not be useful for predicting the 20 quiz observations. Also, missing values are problematic for machine learning algorithms and these are not easily imputed in a meaningful way (_the easiest approach might be duplication, but would it be helpful?_). The best approach, then, for training a real world model (that still works for the quiz) is to remove features with missing data along with the metafeatures.
 
 ```{r rmv_NA_vars}
 keep_vars <- wl_train_NA$col_NA_pct < 50 &
